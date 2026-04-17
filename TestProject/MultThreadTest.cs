@@ -8,7 +8,7 @@ namespace TestProject
     public class MultTest
     {
         [Test]
-        [Timeout(2000)] 
+        [Timeout(2000)]     
         public void FastTest()
         {
             Thread.Sleep(500);

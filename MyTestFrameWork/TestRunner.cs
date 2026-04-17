@@ -13,9 +13,13 @@ namespace MyTestFramework
         private readonly TestRunnerConfiguration _config;
         private readonly TestLogger _logger;
 
-        public TestRunner(TestRunnerConfiguration? config = null)
+        public TestRunner(int? maxThread, TestRunnerConfiguration? config = null, bool ThreadAavaileble = false)
         {
             _config = config ?? new TestRunnerConfiguration();
+            if (maxThread != null)
+                _config.MaxDegreeOfParallelism = (int)maxThread;
+            _config.EnableParallelism = ThreadAavaileble;
+
             _logger = new TestLogger(_config.LogFilePath, _config.Verbose);
         }
 
@@ -32,7 +36,12 @@ namespace MyTestFramework
             _logger.Log($"Начало тестирования сборки: {assembly.GetName().Name}");
             _logger.Log($"Параллелизм: {(_config.EnableParallelism ? "ДА" : "НЕТ")}");
             if (_config.EnableParallelism)
-                _logger.Log($"MaxDegreeOfParallelism: {_config.MaxDegreeOfParallelism}");
+            {
+                if (_config.UseCustomThreadPool)
+                    _logger.Log($"Используется кастомный пул потоков (min={_config.MinThreads}, max={_config.MaxThreads})");
+                else
+                    _logger.Log($"MaxDegreeOfParallelism: {_config.MaxDegreeOfParallelism}");
+            }
             _logger.Log("========================================");
 
             int totalSuccess = 0, totalFail = 0;
@@ -91,10 +100,20 @@ namespace MyTestFramework
                     }
                 }
 
-                // Запускаем тесты параллельно или последовательно
-                var classResults = _config.EnableParallelism
-                    ? RunTestsParallel(testsToRun)
-                    : RunTestsSequential(testsToRun);
+                // Запускаем тесты в зависимости от настроек
+                List<TestResult> classResults;
+                if (!_config.EnableParallelism)
+                {
+                    classResults = RunTestsSequential(testsToRun);
+                }
+                else if (_config.UseCustomThreadPool)
+                {
+                    classResults = RunTestsWithCustomPool(testsToRun);
+                }
+                else
+                {
+                    classResults = RunTestsParallel(testsToRun);
+                }
 
                 allResults.AddRange(classResults);
 
@@ -133,12 +152,10 @@ namespace MyTestFramework
         {
             var results = new List<TestResult>();
             var resultLock = new object();
-            var cts = new CancellationTokenSource();
 
             var parallelOptions = new ParallelOptions
             {
                 MaxDegreeOfParallelism = _config.MaxDegreeOfParallelism,
-                CancellationToken = cts.Token
             };
 
             try
@@ -158,6 +175,56 @@ namespace MyTestFramework
             catch (OperationCanceledException)
             {
                 _logger.Log("⚠️  Выполнение тестов отменено");
+            }
+
+            return results;
+        }
+
+        /// <summary>
+        /// Запуск тестов с использованием кастомного динамического пула потоков.
+        /// </summary>
+        // TestRunner.cs (фрагмент с изменениями в RunTestsWithCustomPool)
+        private List<TestResult> RunTestsWithCustomPool(List<TestInfo> tests)
+        {
+            var results = new List<TestResult>();
+            var resultLock = new object();
+            using var countdown = new CountdownEvent(tests.Count);
+
+            bool ownPool = _config.ExternalThreadPool == null;
+            CustomThreadPool pool = ownPool
+                ? new CustomThreadPool(
+                    minThreads: _config.MinThreads,
+                    maxThreads: _config.MaxThreads,
+                    idleTimeout: _config.IdleThreadTimeout,
+                    queueWaitThreshold: _config.QueueWaitThreshold)
+                : _config.ExternalThreadPool;
+
+            try
+            {
+                foreach (var test in tests)
+                {
+                    var testCopy = test;
+                    pool.QueueUserWorkItem(token =>
+                    {
+                        if (token.IsCancellationRequested) return;
+
+                        var result = ExecuteTest(testCopy);
+                        lock (resultLock)
+                        {
+                            results.Add(result);
+                            _logger.LogTestResult(result.TestName, result.IsSuccess, result.ElapsedMilliseconds,
+                                result.ErrorMessage);
+                        }
+                        countdown.Signal();
+                    }, testCopy.FullName);
+                }
+
+                countdown.Wait();
+            }
+            finally
+            {
+                if (ownPool)
+                    pool.Dispose();
             }
 
             return results;
@@ -221,7 +288,7 @@ namespace MyTestFramework
                 }
                 catch (Exception ex)
                 {
-                    _logger.Log($"⚠️  Ошибка в TearDown: {ex.InnerException?.Message ?? ex.Message}");
+                    _logger.Log($"!  Ошибка в TearDown: {ex.InnerException?.Message ?? ex.Message}");
                 }
             }
         }
@@ -262,7 +329,7 @@ namespace MyTestFramework
             {
                 var task = (Task)testInfo.TestMethod.Invoke(instance, testInfo.Parameters)
                     ?? throw new InvalidOperationException("Асинхронный метод вернул null");
-                task.GetAwaiter().GetResult();
+                task.Wait();
             }
             else
             {

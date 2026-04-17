@@ -6,12 +6,20 @@ namespace MyTestFramework
 {
     public class TestRunnerConfiguration
     {
-        
+
         public int MaxDegreeOfParallelism { get; set; } = 10;
         public bool EnableParallelism { get; set; } = true;
         public string? LogFilePath { get; set; }
         public bool Verbose { get; set; } = true;
         public bool MeasureExecutionTime { get; set; } = true;
+
+        public bool UseCustomThreadPool { get; set; } = true;
+        public int MinThreads { get; set; } = 2;
+        public int MaxThreads { get; set; } = 10;
+        public TimeSpan IdleThreadTimeout { get; set; } = TimeSpan.FromSeconds(5);
+        public TimeSpan QueueWaitThreshold { get; set; } = TimeSpan.FromMilliseconds(200);
+
+        public CustomThreadPool? ExternalThreadPool { get; set; }
     }
 
     internal class TestInfo
