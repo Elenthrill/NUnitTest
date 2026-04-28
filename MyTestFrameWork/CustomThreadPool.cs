@@ -24,6 +24,12 @@ namespace MyTestFramework
         public event Action<string>? LogError;
         public event Action<PoolState>? StateChanged;
 
+        // Новые события жизненного цикла
+        public event Action<int>? ThreadCreated;
+        public event Action<int>? ThreadDestroyed;
+        public event Action<string>? TaskStarted;   // описание задачи
+        public event Action<string>? TaskCompleted;
+
         private int _totalTasksProcessed;
         private int _totalThreadsCreated;
         private int _totalThreadsDestroyed;
@@ -90,6 +96,7 @@ namespace MyTestFramework
             worker.Thread = thread;
             thread.Start();
             LogMessage?.Invoke($"[ThreadPool] ⬆️  Поток создан (ID: {worker.Id}, всего: {_workers.Count})");
+            ThreadCreated?.Invoke(worker.Id);           // <-- событие
             RaiseStateChanged();
         }
 
@@ -98,6 +105,7 @@ namespace MyTestFramework
             worker.Stop();
             lock (_lock) { _workers.Remove(worker); _totalThreadsDestroyed++; }
             LogMessage?.Invoke($"[ThreadPool] ⬇️  Поток уничтожен (ID: {worker.Id}, осталось: {_workers.Count})");
+            ThreadDestroyed?.Invoke(worker.Id);         // <-- событие
             RaiseStateChanged();
         }
 
@@ -185,7 +193,8 @@ namespace MyTestFramework
             public Action<CancellationToken> Work { get; }
             public string? Description { get; }
             public DateTime EnqueueTime { get; }
-            public WorkItem(Action<CancellationToken> work, string? desc) => (Work, Description, EnqueueTime) = (work, desc, DateTime.UtcNow);
+            public WorkItem(Action<CancellationToken> work, string? desc) =>
+                (Work, Description, EnqueueTime) = (work, desc, DateTime.UtcNow);
         }
 
         private class WorkerThread
@@ -225,11 +234,13 @@ namespace MyTestFramework
                         {
                             IsBusy = true; UpdateActivity();
                             _pool.LogMessage?.Invoke($"[ThreadPool] ▶️  Поток {Id} начал: '{item.Description}'");
+                            _pool.TaskStarted?.Invoke(item.Description ?? "без описания");  // <-- событие
                             _pool.RaiseStateChanged();
 
                             ExecuteWorkItem(item);
 
                             _pool.LogMessage?.Invoke($"[ThreadPool] ✅ Поток {Id} завершил: '{item.Description}'");
+                            _pool.TaskCompleted?.Invoke(item.Description ?? "без описания"); // <-- событие
                             Interlocked.Increment(ref _pool._totalTasksProcessed);
                             _pool.OnTaskCompleted();
 

@@ -12,6 +12,11 @@ namespace MyTestFramework
             }
         }
 
+        public static void Fail(string? message = null)
+        {
+            throw new Exception(message ?? "Тест завершился неудачей.");
+        }
+
         public static void IsNotEqual(object expected, object actual)
         {
             if (object.Equals(expected, actual))

@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -47,27 +48,23 @@ namespace MyTestFramework
             int totalSuccess = 0, totalFail = 0;
             var allResults = new List<TestResult>();
 
-            // Получаем все типы из сборки
             Type[] types = assembly.GetTypes();
 
             foreach (Type type in types)
             {
-                // Пропускаем типы, которые не являются классами
                 if (!type.IsClass || type.IsAbstract)
                     continue;
 
-                // Получаем все методы типа
                 MethodInfo[] methods = type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
                                                        BindingFlags.Instance | BindingFlags.Static);
 
-                // Ищем SetUp и TearDown методы
                 MethodInfo? setUpMethod = methods.FirstOrDefault(m => m.GetCustomAttribute<SetUpAttribute>() != null);
                 MethodInfo? tearDownMethod = methods.FirstOrDefault(m => m.GetCustomAttribute<TearDownAttribute>() != null);
 
-                // Собираем тестовые методы
                 List<MethodInfo> testMethods = methods
                     .Where(m => m.GetCustomAttributes<TestAttribute>().Any() ||
-                               m.GetCustomAttributes<TestCaseAttribute>().Any())
+                               m.GetCustomAttributes<TestCaseAttribute>().Any() ||
+                               m.GetCustomAttribute<TestSourceAttribute>() != null)
                     .ToList();
 
                 if (testMethods.Count == 0)
@@ -76,15 +73,51 @@ namespace MyTestFramework
                 _logger.Log($"Найден тестовый класс: {type.Name}");
 
                 int classSuccess = 0, classFail = 0;
-
-                // Подготавливаем список тестов для параллельного запуска
                 var testsToRun = new List<TestInfo>();
 
                 foreach (MethodInfo testMethod in testMethods)
                 {
-                    var testCases = testMethod.GetCustomAttributes<TestCaseAttribute>().ToList();
+                    // Фильтрация тестов
+                    if (!ShouldRunTest(testMethod, type))
+                        continue;
+
                     int? timeoutMs = testMethod.GetCustomAttribute<TimeoutAttribute>()?.Milliseconds;
 
+                    // Обработка TestSource (имеет приоритет, отдельная ветка)
+                    var testSourceAttr = testMethod.GetCustomAttribute<TestSourceAttribute>();
+                    if (testSourceAttr != null)
+                    {
+                        var sourceMethod = type.GetMethod(testSourceAttr.SourceMethodName,
+                            BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                        if (sourceMethod == null)
+                        {
+                            _logger.Log($"! Ошибка: метод-источник '{testSourceAttr.SourceMethodName}' не найден в {type.Name}");
+                            continue;
+                        }
+
+                        var sourceData = sourceMethod.Invoke(null, null) as IEnumerable;
+                        if (sourceData == null)
+                        {
+                            _logger.Log($"! Ошибка: метод '{testSourceAttr.SourceMethodName}' должен возвращать IEnumerable<object[]>");
+                            continue;
+                        }
+
+                        foreach (var item in sourceData)
+                        {
+                            if (item is object[] parameters)
+                            {
+                                testsToRun.Add(new TestInfo(type, testMethod, setUpMethod, tearDownMethod, parameters, timeoutMs));
+                            }
+                            else
+                            {
+                                _logger.Log($"! Ошибка: элемент источника должен быть object[], получено {item?.GetType()}");
+                            }
+                        }
+                        continue; // переходим к следующему методу
+                    }
+
+                    // Обработка TestCase
+                    var testCases = testMethod.GetCustomAttributes<TestCaseAttribute>().ToList();
                     if (testCases.Any())
                     {
                         foreach (var testCase in testCases)
@@ -95,12 +128,12 @@ namespace MyTestFramework
                     }
                     else
                     {
+                        // Обычный тест
                         testsToRun.Add(new TestInfo(type, testMethod, setUpMethod, tearDownMethod,
                             null, timeoutMs));
                     }
                 }
 
-                // Запускаем тесты в зависимости от настроек
                 List<TestResult> classResults;
                 if (!_config.EnableParallelism)
                 {
@@ -116,27 +149,32 @@ namespace MyTestFramework
                 }
 
                 allResults.AddRange(classResults);
-
                 classSuccess = classResults.Count(r => r.IsSuccess);
                 classFail = classResults.Count(r => !r.IsSuccess);
-
                 _logger.Log($"Класс {type.Name}: успешно {classSuccess}, провалено {classFail}");
                 _logger.Log("");
-
                 totalSuccess += classSuccess;
                 totalFail += classFail;
             }
 
             stopwatch.Stop();
-
-            // Вывод итогов
             PrintSummary(totalSuccess, totalFail, stopwatch.ElapsedMilliseconds, allResults);
         }
+
+        private bool ShouldRunTest(MethodInfo method, Type testClass)
+        {
+            if (_config.TestFilter == null) return true;
+            return _config.TestFilter(method, testClass);
+        }
+
+        // Остальные методы (RunTestsSequential, RunTestsParallel, RunTestsWithCustomPool,
+        // ExecuteTest, ExecuteTestMethod, InvokeTestMethod, PrintSummary) остаются без изменений.
+        // ... (приведены для полноты, но в ответе можно сократить, указав, что они не менялись)
+        // Здесь я приведу их все для целостности файла.
 
         private List<TestResult> RunTestsSequential(List<TestInfo> tests)
         {
             var results = new List<TestResult>();
-
             foreach (var test in tests)
             {
                 var result = ExecuteTest(test);
@@ -144,7 +182,6 @@ namespace MyTestFramework
                 _logger.LogTestResult(result.TestName, result.IsSuccess, result.ElapsedMilliseconds,
                     result.ErrorMessage);
             }
-
             return results;
         }
 
@@ -152,18 +189,15 @@ namespace MyTestFramework
         {
             var results = new List<TestResult>();
             var resultLock = new object();
-
             var parallelOptions = new ParallelOptions
             {
                 MaxDegreeOfParallelism = _config.MaxDegreeOfParallelism,
             };
-
             try
             {
                 Parallel.ForEach(tests, parallelOptions, (test) =>
                 {
                     var result = ExecuteTest(test);
-
                     lock (resultLock)
                     {
                         results.Add(result);
@@ -176,20 +210,14 @@ namespace MyTestFramework
             {
                 _logger.Log("⚠️  Выполнение тестов отменено");
             }
-
             return results;
         }
 
-        /// <summary>
-        /// Запуск тестов с использованием кастомного динамического пула потоков.
-        /// </summary>
-        // TestRunner.cs (фрагмент с изменениями в RunTestsWithCustomPool)
         private List<TestResult> RunTestsWithCustomPool(List<TestInfo> tests)
         {
             var results = new List<TestResult>();
             var resultLock = new object();
             using var countdown = new CountdownEvent(tests.Count);
-
             bool ownPool = _config.ExternalThreadPool == null;
             CustomThreadPool pool = ownPool
                 ? new CustomThreadPool(
@@ -198,7 +226,6 @@ namespace MyTestFramework
                     idleTimeout: _config.IdleThreadTimeout,
                     queueWaitThreshold: _config.QueueWaitThreshold)
                 : _config.ExternalThreadPool;
-
             try
             {
                 foreach (var test in tests)
@@ -207,7 +234,6 @@ namespace MyTestFramework
                     pool.QueueUserWorkItem(token =>
                     {
                         if (token.IsCancellationRequested) return;
-
                         var result = ExecuteTest(testCopy);
                         lock (resultLock)
                         {
@@ -218,15 +244,12 @@ namespace MyTestFramework
                         countdown.Signal();
                     }, testCopy.FullName);
                 }
-
                 countdown.Wait();
             }
             finally
             {
-                if (ownPool)
-                    pool.Dispose();
+                if (ownPool) pool.Dispose();
             }
-
             return results;
         }
 
@@ -234,10 +257,8 @@ namespace MyTestFramework
         {
             var stopwatch = Stopwatch.StartNew();
             object? instance = null;
-
             try
             {
-                // Создаём экземпляр класса, если метод нестатический
                 if (!testInfo.TestMethod.IsStatic)
                 {
                     try
@@ -251,13 +272,8 @@ namespace MyTestFramework
                             "Невозможно создать экземпляр класса – нет конструктора без параметров");
                     }
                 }
-
-                // Вызов SetUp
                 testInfo.SetUpMethod?.Invoke(instance, null);
-
-                // Выполнение теста с учётом timeout
                 ExecuteTestMethod(testInfo, instance);
-
                 stopwatch.Stop();
                 return new TestResult(testInfo.FullName, true, stopwatch.ElapsedMilliseconds);
             }
@@ -281,7 +297,6 @@ namespace MyTestFramework
             }
             finally
             {
-                // Вызов TearDown
                 try
                 {
                     testInfo.TearDownMethod?.Invoke(instance, null);
@@ -295,34 +310,23 @@ namespace MyTestFramework
 
         private void ExecuteTestMethod(TestInfo testInfo, object? instance)
         {
-            // Проверяем, есть ли timeout
             if (testInfo.TimeoutMs.HasValue)
             {
                 var task = Task.Run(() => InvokeTestMethod(testInfo, instance));
                 bool completed = task.Wait(TimeSpan.FromMilliseconds(testInfo.TimeoutMs.Value));
-
                 if (!completed)
-                {
-                    throw new TimeoutException(
-                        $"Тест не завершился за {testInfo.TimeoutMs.Value}ms");
-                }
-
-                // Проверяем, не было ли исключений в асинхронной задаче
+                    throw new TimeoutException($"Тест не завершился за {testInfo.TimeoutMs.Value}ms");
                 if (task.IsFaulted)
-                {
                     throw task.Exception ?? new Exception("Неизвестная ошибка в тесте");
-                }
             }
             else
             {
-                // Выполняем без ограничения по времени
                 InvokeTestMethod(testInfo, instance);
             }
         }
 
         private void InvokeTestMethod(TestInfo testInfo, object? instance)
         {
-            // Если метод асинхронный, дожидаемся выполнения
             if (testInfo.TestMethod.ReturnType == typeof(Task) ||
                 (testInfo.TestMethod.ReturnType.IsGenericType &&
                  testInfo.TestMethod.ReturnType.GetGenericTypeDefinition() == typeof(Task<>)))
@@ -333,7 +337,6 @@ namespace MyTestFramework
             }
             else
             {
-                // Синхронный метод
                 testInfo.TestMethod.Invoke(instance, testInfo.Parameters);
             }
         }
@@ -345,18 +348,15 @@ namespace MyTestFramework
             _logger.Log("========================================");
             _logger.Log($"ИТОГО: успешно {totalSuccess}, провалено {totalFail}");
             _logger.Log($"Общее время выполнения: {totalElapsedMs}ms");
-
             if (allResults.Any())
             {
                 long avgTime = (long)allResults.Average(r => r.ElapsedMilliseconds);
                 long maxTime = allResults.Max(r => r.ElapsedMilliseconds);
                 long minTime = allResults.Min(r => r.ElapsedMilliseconds);
-
                 _logger.Log($"Среднее время теста: {avgTime}ms");
                 _logger.Log($"Минимальное время: {minTime}ms");
                 _logger.Log($"Максимальное время: {maxTime}ms");
             }
-
             _logger.Log("========================================");
         }
 

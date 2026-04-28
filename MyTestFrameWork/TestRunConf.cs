@@ -1,12 +1,10 @@
 ﻿using System;
 using System.Reflection;
-using System.Text;
 
 namespace MyTestFramework
 {
     public class TestRunnerConfiguration
     {
-
         public int MaxDegreeOfParallelism { get; set; } = 10;
         public bool EnableParallelism { get; set; } = true;
         public string? LogFilePath { get; set; }
@@ -20,6 +18,12 @@ namespace MyTestFramework
         public TimeSpan QueueWaitThreshold { get; set; } = TimeSpan.FromMilliseconds(200);
 
         public CustomThreadPool? ExternalThreadPool { get; set; }
+
+        /// <summary>
+        /// Делегат для фильтрации тестов. Принимает MethodInfo тестового метода и Type класса теста.
+        /// Возвращает true, если тест должен быть выполнен.
+        /// </summary>
+        public Func<MethodInfo, Type, bool>? TestFilter { get; set; }
     }
 
     internal class TestInfo
